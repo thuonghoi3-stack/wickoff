@@ -1,0 +1,36 @@
+{
+  "url": "http://127.0.0.1:8080/",
+  "viewports": {
+    "desktop": {
+      "width": 1280,
+      "height": 800,
+      "status": 200,
+      "title": "WYCK",
+      "hasCanvas": false,
+      "bodyTextLen": 521,
+      "bodyTextHash": "5117efe2c66523f710acfcc31a6ef98bdc4dcf11d7bbe616297d0af55af37e66",
+      "bodyTextPrefix": "BINANCE USDT-M PERPETUAL WYCK Bàn mô phỏng bot Wyckoff. Nến futu",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-preview.png"
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "status": 200,
+      "title": "WYCK",
+      "hasCanvas": false,
+      "bodyTextLen": 521,
+      "bodyTextHash": "5117efe2c66523f710acfcc31a6ef98bdc4dcf11d7bbe616297d0af55af37e66",
+      "bodyTextPrefix": "BINANCE USDT-M PERPETUAL WYCK Bàn mô phỏng bot Wyckoff. Nến futu",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-preview-mobile.png"
+    }
+  },
+  "brandWarnings": [],
+  "authWarnings": [],
+  "verdictFile": "/workspace/screenshots/app-builder-preview.json"
+}

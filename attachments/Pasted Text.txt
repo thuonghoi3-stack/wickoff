@@ -1,0 +1,899 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © EyeAlgo
+//@version=6
+indicator("Eye Wyckoff Phases [EyeAlgo]", "Eye Wyckoff Phases", overlay = true, max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500, max_bars_back = 5000)
+
+// ═══════════════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════════════
+string G1 = "Climax & Range"
+int   climaxLook = input.int(50, "Climax lookback (bars)", minval = 10, maxval = 500, group = G1, tooltip = "A Selling Climax must make the lowest low (Buying Climax the highest high) of this many bars.")
+int   emaLen     = input.int(50, "Prior trend EMA length", minval = 5, maxval = 400, group = G1, tooltip = "Selling Climax needs a close below this EMA (prior downtrend). Buying Climax needs a close above it.")
+float climaxZ    = input.float(2.0, "Climax volume (z-score)", minval = 0.5, maxval = 8.0, step = 0.1, group = G1, tooltip = "How unusual the climax volume must be vs the last 50 bars. Without volume data the bar size is used instead.")
+float climaxAtr  = input.float(1.3, "Climax bar size (x ATR)", minval = 0.3, maxval = 6.0, step = 0.1, group = G1)
+int   atrLen     = input.int(14, "ATR length", minval = 2, maxval = 200, group = G1)
+float arPull     = input.float(1.0, "AR confirm pullback (x ATR)", minval = 0.2, maxval = 5.0, step = 0.1, group = G1, tooltip = "The Automatic Rally / Reaction is confirmed when price pulls back this far from its extreme.")
+float minHAtr    = input.float(2.5, "Min range height (x ATR)", minval = 0.5, maxval = 30.0, step = 0.1, group = G1)
+float maxHAtr    = input.float(12.0, "Max range height (x ATR)", minval = 1.0, maxval = 60.0, step = 0.5, group = G1)
+int   arMax      = input.int(40, "Max bars from climax to AR", minval = 3, maxval = 300, group = G1)
+int   maxLife    = input.int(300, "Max range life (bars)", minval = 30, maxval = 3000, group = G1, tooltip = "A range with no breakout after this many bars is closed as expired.")
+int   maxRe      = input.int(2, "Max range re-anchors", minval = 0, maxval = 5, group = G1, tooltip = "When price breaks the climax side with a new climax bar, the range is extended to the new extreme instead of failing (range extension). 0 = off.")
+
+string G2 = "Wyckoff Events"
+float stZone     = input.float(0.33, "ST / Test zone (part of range height)", minval = 0.05, maxval = 0.6, step = 0.01, group = G2, tooltip = "Secondary Test and Test must come back within this part of the range height from the climax / spring side.")
+float stEffort   = input.float(1.0, "ST max volume vs climax", minval = 0.1, maxval = 2.0, step = 0.05, group = G2)
+int   minB       = input.int(8, "Min Phase B bars", minval = 1, maxval = 300, group = G2, tooltip = "Bars after the Secondary Test before a Spring / UTAD or SOS / SOW can be marked (building the cause).")
+float springPen  = input.float(1.0, "Max Spring / UTAD depth (x ATR)", minval = 0.1, maxval = 5.0, step = 0.1, group = G2, tooltip = "Deeper moves beyond the range are treated as a real break (or a range re-anchor), not a Spring / UTAD.")
+int   springBars = input.int(3, "Bars to close back inside", minval = 1, maxval = 10, group = G2)
+float sosZ       = input.float(0.3, "SOS / SOW min volume (z-score)", minval = -1.0, maxval = 5.0, step = 0.1, group = G2)
+float sosBody    = input.float(0.5, "SOS / SOW min body (part of bar)", minval = 0.0, maxval = 1.0, step = 0.05, group = G2)
+int   lpsMax     = input.int(40, "Max bars from SOS to LPS", minval = 3, maxval = 300, group = G2)
+float lpsTol     = input.float(1.0, "LPS zone around breakout level (x ATR)", minval = 0.0, maxval = 5.0, step = 0.1, group = G2)
+float eMult      = input.float(0.5, "Phase E distance (x range height)", minval = 0.1, maxval = 3.0, step = 0.1, group = G2)
+
+string G3 = "Trade Plan"
+bool   showTrade = input.bool(true, "Show trade plan", group = G3)
+string entryMode = input.string("LPS + Spring Test", "Entry type", options = ["LPS + Spring Test", "LPS only", "Spring Test only"], group = G3, tooltip = "LPS / LPSY = entry after the breakout pullback. Spring Test = earlier entry when a Spring / UTAD is re-tested on lower volume.")
+string tradeSide = input.string("Both", "Direction", options = ["Both", "Long only", "Short only"], group = G3)
+string minGrade  = input.string("C", "Minimum setup grade", options = ["A", "B", "C"], group = G3, tooltip = "A = score 75+, B = 55+, C = below 55.")
+string slMode    = input.string("Range mid", "LPS stop placement", options = ["Range mid", "LPS low / high", "Spring / UTAD extreme"], group = G3, tooltip = "Where the stop of an LPS / LPSY trade goes. Spring Test trades always use the Spring / UTAD extreme.")
+float  slAtr     = input.float(0.3, "Stop buffer (x ATR)", minval = 0.0, maxval = 5.0, step = 0.1, group = G3)
+int    causeRef  = input.int(40, "Cause reference bars", minval = 5, maxval = 500, group = G3, tooltip = "Cause target (TP3) = breakout level + range height x (bars in range / this value), between 1x and the max multiple.")
+float  causeMax  = input.float(3.0, "Max cause multiple", minval = 1.0, maxval = 10.0, step = 0.5, group = G3)
+bool   scaleOut  = input.bool(true, "Scale out 1/3 at TP1, TP2, TP3", group = G3, tooltip = "On: 1/3 closed at each target, stop to entry after TP1 and to TP1 after TP2. Off: full position to TP2.")
+int    tradeMax  = input.int(200, "Max bars in trade", minval = 10, maxval = 2000, group = G3)
+
+string G4 = "Context"
+string htfTf     = input.timeframe("240", "Higher timeframe", group = G4, tooltip = "Used for the HTF bias row and the setup score. Pick a timeframe higher than the chart.")
+
+string G5 = "Visuals"
+bool   showBox    = input.bool(true, "Range box", group = G5)
+bool   showLabels = input.bool(true, "Event labels", group = G5)
+string lblStyle   = input.string("Short", "Label text", options = ["Short", "Full name"], group = G5)
+bool   showPhases = input.bool(true, "Phase A-E markers", group = G5)
+bool   showFail   = input.bool(true, "Mark failed ranges (✕)", group = G5)
+bool   showSum    = input.bool(true, "Floating summary label", group = G5)
+int    keepN      = input.int(12, "Schematics kept on chart", minval = 1, maxval = 30, group = G5)
+string txtSize    = input.string("Small", "Label size", options = ["Tiny", "Small", "Normal"], group = G5)
+color  accCol     = input.color(#089981, "Accumulation", group = G5)
+color  distCol    = input.color(#F23645, "Distribution", group = G5)
+
+string G6 = "Dashboard"
+bool   showDash   = input.bool(true, "Dashboard", group = G6)
+string dashMode   = input.string("Full", "Dashboard size", options = ["Full", "Compact"], group = G6)
+string dashPos    = input.string("Top Right", "Dashboard position", options = ["Top Left", "Top Center", "Top Right", "Middle Left", "Middle Center", "Middle Right", "Bottom Left", "Bottom Center", "Bottom Right"], group = G6)
+string dashTheme  = input.string("Auto", "Dashboard theme", options = ["Auto", "Dark", "Light"], group = G6)
+string dashFont   = input.string("Small", "Dashboard font", options = ["Tiny", "Small", "Normal"], group = G6)
+bool   showMap    = input.bool(true, "Schematic map panel", group = G6)
+string mapPos     = input.string("Bottom Left", "Schematic map position", options = ["Top Left", "Top Center", "Top Right", "Middle Left", "Middle Center", "Middle Right", "Bottom Left", "Bottom Center", "Bottom Right"], group = G6)
+
+string G7 = "Alerts"
+bool aRange = input.bool(true, "New range", group = G7)
+bool aEvent = input.bool(true, "Spring / Test / SOS events", group = G7)
+bool aEntry = input.bool(true, "Trade entries", group = G7)
+bool aExit  = input.bool(true, "Targets / stops", group = G7)
+bool aFail  = input.bool(true, "Failed ranges", group = G7)
+bool aJson  = input.bool(false, "JSON message (webhooks)", group = G7, tooltip = "Sends the alert() message as a JSON array for bots and webhooks.")
+
+// ═══════════════════════════════════════════════════════════════════════
+// CORE SERIES
+// ═══════════════════════════════════════════════════════════════════════
+float atr      = ta.atr(atrLen)
+float ema      = ta.ema(close, emaLen)
+float vol      = nz(volume)
+bool  hasVol   = ta.cum(vol) > 0
+float vMa      = ta.sma(vol, 50)
+float vSd      = ta.stdev(vol, 50)
+float vS10     = ta.sma(vol, 10)
+float volZ     = hasVol and vSd > 0 ? (vol - vMa) / vSd : 0.0
+float volRel   = hasVol and vMa > 0 ? vol / vMa : 1.0
+float rng      = high - low
+float body     = math.abs(close - open)
+float lowestL  = ta.lowest(low, climaxLook)
+float highestH = ta.highest(high, climaxLook)
+float rngMa    = ta.sma(rng, 20)
+bool  bigBar   = rng >= climaxAtr * atr
+bool  climaxV  = hasVol ? volZ >= climaxZ : rng >= climaxAtr * 1.6 * atr
+bool  isSC     = not na(atr) and close < ema and low <= lowestL and bigBar and climaxV
+bool  isBC     = not na(atr) and close > ema and high >= highestH and bigBar and climaxV
+
+f_htfBias() =>
+    float e = ta.ema(close, 50)
+    close > e and e > e[5] ? 1 : close < e and e < e[5] ? -1 : 0
+int htf = nz(request.security(syminfo.tickerid, htfTf, f_htfBias()[1], lookahead = barmerge.lookahead_on), 0)
+
+string sz = txtSize == "Tiny" ? size.tiny : txtSize == "Normal" ? size.normal : size.small
+
+// ═══════════════════════════════════════════════════════════════════════
+// STATE
+// st: 0 searching · 1 climax (wait AR) · 2 Phase A (wait ST) · 3 Phase B
+//     4 Phase C (after Spring / UTAD) · 5 Phase D (after SOS / SOW) · 6 Phase E
+// d : +1 accumulation · -1 distribution
+// ═══════════════════════════════════════════════════════════════════════
+var int    st        = 0
+var int    d         = 0
+var int    schId     = 0
+var float  cLvl      = na
+var float  bLvl      = na
+var float  ext       = na
+var int    cBar      = na
+var int    extBar    = na
+var int    arBar     = na
+var int    bStart    = na
+var int    spBar     = na
+var int    sosBar    = na
+var int    lpsBar    = na
+var float  cVol      = 0.0
+var float  cZv       = 0.0
+var float  cRel      = 1.0
+var float  spLvl     = na
+var float  spVol     = 0.0
+var int    spQ       = 0
+var float  sosVol    = 0.0
+var float  sosZv     = 0.0
+var bool   hadSpring = false
+var bool   hadTest   = false
+var bool   eShown    = false
+var int    reCnt     = 0
+var int    pend      = 0
+var float  pendExt   = na
+var int    pendBar   = na
+var float  pendVol   = 0.0
+var string lastEv    = "—"
+var int    lastScore = 0
+var box    rBox      = na
+var line   midL      = na
+
+// trade
+var bool   inTrade = false
+var string tType   = ""
+var int    tDir    = 0
+var int    tBar    = na
+var float  tE      = na
+var float  tSL     = na
+var float  tCurSL  = na
+var float  tTP1    = na
+var float  tTP2    = na
+var float  tTP3    = na
+var float  tRisk   = na
+var int    tHits   = 0
+var float  tReal   = 0.0
+var float  tRemain = 1.0
+var string tGrade  = ""
+var int    tScore  = 0
+var int    tSch    = 0
+var box    tRiskB  = na
+var box    tRewB   = na
+var line   tTp1L   = na
+var line   tTp2L   = na
+
+// stats (grade index 0 = A, 1 = B, 2 = C)
+var array<int>   gN   = array.from(0, 0, 0)
+var array<float> gR   = array.from(0.0, 0.0, 0.0)
+var array<int>   trT  = array.new<int>()
+var array<float> trR  = array.new<float>()
+var array<int>   trH  = array.new<int>()
+var int nAcc   = 0
+var int nDist  = 0
+var int nSp    = 0
+var int nSpSos = 0
+var int nFail  = 0
+var int nReAll = 0
+
+// drawing queues (oldest schematic deleted first)
+var array<label> qL   = array.new<label>()
+var array<int>   qLi  = array.new<int>()
+var array<line>  qN   = array.new<line>()
+var array<int>   qNi  = array.new<int>()
+var array<box>   qB   = array.new<box>()
+var array<int>   qBi  = array.new<int>()
+
+// ═══════════════════════════════════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════════════════════════════════
+f_x(int x) =>
+    math.max(x, bar_index - 4900)
+
+f_cleanup(int cut) =>
+    while qL.size() > 0 and qLi.first() <= cut
+        label.delete(qL.shift())
+        qLi.shift()
+    while qN.size() > 0 and qNi.first() <= cut
+        line.delete(qN.shift())
+        qNi.shift()
+    while qB.size() > 0 and qBi.first() <= cut
+        box.delete(qB.shift())
+        qBi.shift()
+
+f_ev(int x, float y, string s, string f, bool below, color c, string tip) =>
+    if showLabels
+        label l = label.new(f_x(x), y, lblStyle == "Short" ? s : f, xloc = xloc.bar_index, style = below ? label.style_label_up : label.style_label_down, color = c, textcolor = color.white, size = sz, tooltip = tip)
+        qL.push(l)
+        qLi.push(schId)
+
+f_phase(int x, string t, float top, float bot) =>
+    if showPhases
+        line ln = line.new(f_x(x), top, f_x(x), bot, color = color.new(chart.fg_color, 55), style = line.style_dotted, width = 1)
+        qN.push(ln)
+        qNi.push(schId)
+        label lb = label.new(f_x(x), top, t, xloc = xloc.bar_index, style = label.style_label_down, color = color.new(chart.bg_color, 100), textcolor = color.new(chart.fg_color, 20), size = size.small)
+        qL.push(lb)
+        qLi.push(schId)
+
+f_tip(string name, float lvl, float rel) =>
+    name + "\nLevel: " + str.tostring(lvl, format.mintick) + (hasVol ? "\nVolume: " + str.tostring(rel, "0.0") + "x average" : "")
+
+f_score(float cz, bool sp, int q, bool ts, float sz_, int life, bool lowEff, int hb, int dd) =>
+    int s = 0
+    s += cz >= climaxZ + 1.0 ? 15 : 8
+    s += sp ? int(math.round(20.0 * q / 100.0)) : 0
+    s += ts ? 15 : 0
+    s += sz_ >= 1.0 ? 15 : sz_ >= sosZ ? 8 : 0
+    s += life >= causeRef ? 15 : life >= causeRef / 2 ? 8 : 0
+    s += lowEff ? 10 : 0
+    s += hb == dd ? 10 : hb == 0 ? 5 : 0
+    s
+
+f_grade(int s) =>
+    s >= 75 ? "A" : s >= 55 ? "B" : "C"
+
+f_gIdx(string g) =>
+    g == "A" ? 0 : g == "B" ? 1 : 2
+
+f_phaseName(int s) =>
+    s == 1 or s == 2 ? "A" : s == 3 ? "B" : s == 4 ? "C" : s == 5 ? "D" : s == 6 ? "E" : "—"
+
+f_cause(int life) =>
+    math.min(math.max(float(life) / causeRef, 1.0), causeMax)
+
+f_pct(int a, int b) =>
+    b > 0 ? str.tostring(100.0 * a / b, "0") + "%" : "—"
+
+f_pos(string p) =>
+    p == "Top Left" ? position.top_left : p == "Top Center" ? position.top_center : p == "Top Right" ? position.top_right : p == "Middle Left" ? position.middle_left : p == "Middle Center" ? position.middle_center : p == "Middle Right" ? position.middle_right : p == "Bottom Left" ? position.bottom_left : p == "Bottom Center" ? position.bottom_center : position.bottom_right
+
+f_msg(string ev, string side, float px, string extra) =>
+    aJson ? "{\"indicator\":\"Eye Wyckoff Phases\",\"ticker\":\"" + syminfo.ticker + "\",\"tf\":\"" + timeframe.period + "\",\"event\":\"" + ev + "\",\"side\":\"" + side + "\",\"price\":" + str.tostring(px) + extra + "}" : "Eye Wyckoff Phases · " + syminfo.ticker + " · " + ev + (side != "" ? " · " + side : "") + " · " + str.tostring(px, format.mintick) + extra
+
+// ═══════════════════════════════════════════════════════════════════════
+// EVENT FLAGS (for alerts)
+// ═══════════════════════════════════════════════════════════════════════
+bool evRange  = false
+bool evSpring = false
+bool evTest   = false
+bool evSOS    = false
+bool evEntry  = false
+bool evTP1    = false
+bool evTP2    = false
+bool evTP3    = false
+bool evSL     = false
+bool evFail   = false
+array<string> msgs = array.new<string>()
+
+// ═══════════════════════════════════════════════════════════════════════
+// ENGINE (bar close only — no repaint)
+// ═══════════════════════════════════════════════════════════════════════
+if barstate.isconfirmed and not na(atr)
+    bool   endNow   = false
+    bool   endFail  = false
+    bool   doBreak  = false
+    string endTxt   = ""
+    bool   goSOS    = false
+    bool   doSpring = false
+    bool   doLPS    = false
+    bool   doTest   = false
+    color  col      = d == 1 ? accCol : distCol
+    float  xC       = d == 1 ? low : high
+    float  xB       = d == 1 ? high : low
+    float  H        = math.abs(bLvl - cLvl)
+    string nmS      = d == 1 ? "Spring" : "UTAD"
+
+    // ── trade management ───────────────────────────────────────────
+    if inTrade and bar_index > tBar
+        bool  hSL = tDir == 1 ? low <= tCurSL : high >= tCurSL
+        bool  done = false
+        string rTx = ""
+        array<float> tps = array.from(tTP1, tTP2, tTP3)
+        if hSL
+            tReal   += tRemain * tDir * (tCurSL - tE) / tRisk
+            tRemain := 0.0
+            done    := true
+            rTx     := tCurSL == tSL ? "SL" : tHits == 1 ? "BE" : "TP1 stop"
+            evSL    := tCurSL == tSL
+        else
+            if scaleOut
+                while tHits < 3 and (tDir == 1 ? high >= tps.get(tHits) : low <= tps.get(tHits))
+                    float rk = math.abs(tps.get(tHits) - tE) / tRisk
+                    tReal   += rk / 3.0
+                    tRemain -= 1.0 / 3.0
+                    tHits   += 1
+                    if tHits == 1
+                        tCurSL := tE
+                        evTP1  := true
+                    else if tHits == 2
+                        tCurSL := tTP1
+                        evTP2  := true
+                    else
+                        evTP3  := true
+                if tHits >= 3
+                    tRemain := 0.0
+                    done    := true
+                    rTx     := "TP3"
+            else
+                if tDir == 1 ? high >= tTP1 : low <= tTP1
+                    if tHits == 0
+                        evTP1 := true
+                    tHits := math.max(tHits, 1)
+                if tDir == 1 ? high >= tTP2 : low <= tTP2
+                    tReal   += math.abs(tTP2 - tE) / tRisk
+                    tRemain := 0.0
+                    tHits   := 2
+                    evTP2   := true
+                    done    := true
+                    rTx     := "TP2"
+        if not done and bar_index - tBar >= tradeMax
+            tReal   += tRemain * tDir * (close - tE) / tRisk
+            tRemain := 0.0
+            done    := true
+            rTx     := "Time exit"
+        if done
+            int gi = f_gIdx(tGrade)
+            gN.set(gi, gN.get(gi) + 1)
+            gR.set(gi, gR.get(gi) + tReal)
+            trT.push(time)
+            trR.push(tReal)
+            trH.push(tHits)
+            inTrade := false
+            if showTrade
+                box.set_right(tRiskB, bar_index)
+                box.set_right(tRewB, bar_index)
+                line.set_x2(tTp1L, bar_index)
+                line.set_x2(tTp2L, bar_index)
+                string rs = rTx + " " + (tReal >= 0 ? "+" : "") + str.tostring(tReal, "0.0") + "R"
+                f_ev(bar_index, tDir == 1 ? high : low, rs, rs, tDir == -1, tReal > 0 ? accCol : tReal < 0 ? distCol : color.gray, "Trade closed: " + rTx + "\nResult: " + str.tostring(tReal, "0.00") + "R\nTargets hit: " + str.tostring(tHits))
+            if aExit
+                msgs.push(f_msg("Trade closed " + rTx, tDir == 1 ? "long" : "short", close, aJson ? ",\"r\":" + str.tostring(tReal, "0.00") : ""))
+            if st == 6 and tSch == schId
+                endNow := true
+                endTxt := "Trade closed (" + rTx + ")"
+        else
+            if showTrade
+                box.set_right(tRiskB, bar_index)
+                box.set_right(tRewB, bar_index)
+                line.set_x2(tTp1L, bar_index)
+                line.set_x2(tTp2L, bar_index)
+            if aExit and (evTP1 or evTP2)
+                msgs.push(f_msg(evTP2 ? "TP2 hit" : "TP1 hit", tDir == 1 ? "long" : "short", close, ""))
+
+    // ── state machine ──────────────────────────────────────────────
+    if st == 0
+        if isSC or isBC
+            d         := isSC ? 1 : -1
+            st        := 1
+            cLvl      := isSC ? low : high
+            cBar      := bar_index
+            cVol      := vol
+            cZv       := volZ
+            cRel      := volRel
+            ext       := close
+            extBar    := bar_index
+            hadSpring := false
+            hadTest   := false
+            eShown    := false
+            spQ       := 0
+            reCnt     := 0
+            pend      := 0
+            lastEv    := isSC ? "SC" : "BC"
+    else if st == 1
+        float pen = d * (cLvl - xC)
+        if pen > 0
+            if pen <= atr
+                cLvl   := xC
+                cBar   := bar_index
+                cVol   := math.max(cVol, vol)
+                cZv    := math.max(cZv, volZ)
+                cRel   := math.max(cRel, volRel)
+                ext    := close
+                extBar := bar_index
+            else
+                st := 0
+        else
+            if d * (xB - ext) > 0
+                ext    := xB
+                extBar := bar_index
+            float h = math.abs(ext - cLvl)
+            if extBar > cBar and d * (ext - close) >= arPull * atr and h >= minHAtr * atr
+                if h <= maxHAtr * atr
+                    bLvl  := ext
+                    arBar := extBar
+                    st    := 2
+                    schId += 1
+                    if d == 1
+                        nAcc += 1
+                    else
+                        nDist += 1
+                    f_cleanup(schId - keepN)
+                    float top = math.max(cLvl, bLvl)
+                    float bot = math.min(cLvl, bLvl)
+                    float mid = (top + bot) / 2
+                    rBox := na
+                    midL := na
+                    if showBox
+                        rBox := box.new(f_x(cBar), top, bar_index, bot, border_color = color.new(col, 35), bgcolor = color.new(col, 91), text = (d == 1 ? "Accumulation" : "Distribution") + " · Phase A", text_color = color.new(col, 10), text_size = size.small, text_halign = text.align_left, text_valign = text.align_top)
+                        qB.push(rBox)
+                        qBi.push(schId)
+                        midL := line.new(f_x(cBar), mid, bar_index, mid, color = color.new(col, 50), style = line.style_dashed)
+                        qN.push(midL)
+                        qNi.push(schId)
+                    f_ev(cBar, cLvl, d == 1 ? "SC" : "BC", d == 1 ? "Selling Climax" : "Buying Climax", d == 1, col, f_tip(d == 1 ? "Selling Climax" : "Buying Climax", cLvl, cRel))
+                    f_ev(arBar, bLvl, "AR", d == 1 ? "Automatic Rally" : "Automatic Reaction", d == -1, col, f_tip(d == 1 ? "Automatic Rally" : "Automatic Reaction", bLvl, volRel[bar_index - arBar]))
+                    f_phase(cBar, "A", top, bot)
+                    lastEv  := "AR"
+                    evRange := true
+                    if aRange
+                        msgs.push(f_msg("New " + (d == 1 ? "accumulation" : "distribution") + " range", d == 1 ? "long bias" : "short bias", close, aJson ? ",\"rangeLow\":" + str.tostring(bot) + ",\"rangeHigh\":" + str.tostring(top) : ""))
+                else
+                    st := 0
+            else if bar_index - cBar > arMax
+                st := 0
+    else if st == 2
+        if d * (cLvl - close) > springPen * atr
+            doBreak := true
+        else if d * (close - bLvl) > H
+            endNow := true
+            endTxt := "Left range"
+        else if bar_index - arBar >= 2 and d * (xC - cLvl) <= stZone * H and d * (close - cLvl) > 0 and (not hasVol or vol <= stEffort * cVol)
+            st     := 3
+            bStart := bar_index
+            f_ev(bar_index, xC, "ST", "Secondary Test", d == 1, col, f_tip("Secondary Test", xC, volRel))
+            f_phase(bar_index, "B", math.max(cLvl, bLvl), math.min(cLvl, bLvl))
+            lastEv := "ST"
+    else if st == 3
+        bool sosNow = d * (close - bLvl) > 0.1 * atr and body >= sosBody * rng and d * (close - open) > 0 and (not hasVol or volZ >= sosZ)
+        if pend > 0
+            pend += 1
+            if d * (pendExt - xC) > 0
+                pendExt := xC
+                pendBar := bar_index
+                pendVol := math.max(pendVol, vol)
+            if d * (cLvl - pendExt) > springPen * atr
+                doBreak := true
+            else if d * (close - cLvl) > 0
+                spLvl    := pendExt
+                spBar    := pendBar
+                spVol    := pendVol
+                doSpring := true
+            else if pend > springBars
+                doBreak := true
+        else if d * (close - bLvl) > H
+            endNow := true
+            endTxt := "Left range"
+        else if bar_index - bStart >= minB
+            float pen = d * (cLvl - xC)
+            if sosNow
+                goSOS := true
+            else if pen > 0.1 * atr
+                if pen > springPen * atr
+                    doBreak := true
+                else if d * (close - cLvl) > 0
+                    spLvl    := xC
+                    spBar    := bar_index
+                    spVol    := vol
+                    doSpring := true
+                else
+                    pend    := 1
+                    pendExt := xC
+                    pendBar := bar_index
+                    pendVol := vol
+        else if d * (cLvl - close) > springPen * atr
+            doBreak := true
+    else if st == 4
+        bool sosNow = d * (close - bLvl) > 0.1 * atr and body >= sosBody * rng and d * (close - open) > 0 and (not hasVol or volZ >= sosZ)
+        if d * (spLvl - close) > 0
+            endNow  := true
+            endFail := true
+            endTxt  := "Failed " + nmS
+        else if d * (close - bLvl) > H
+            endNow := true
+            endTxt := "Left range"
+        else if sosNow
+            goSOS := true
+        else if not hadTest and bar_index > spBar + 1 and d * (xC - cLvl) <= stZone * H and d * (xC - spLvl) >= 0 and (not hasVol or vol < spVol) and d * (close - open) >= 0
+            doTest := true
+    else if st == 5
+        float mid   = (cLvl + bLvl) / 2
+        bool  inLps = bar_index > sosBar and d * (xC - bLvl) <= lpsTol * atr and d * (xC - mid) > 0
+        bool  conf  = d * (close - bLvl) > 0 and (d == 1 ? close - low >= 0.5 * rng : high - close >= 0.5 * rng)
+        if inLps and conf
+            doLPS := true
+        else if d * (bLvl - close) > 0.5 * H
+            st     := 3
+            lastEv := "Back in range"
+        else if d * (close - bLvl) >= H
+            endNow := true
+            endTxt := d == 1 ? "Markup (no LPS)" : "Markdown (no LPSY)"
+        else if bar_index - sosBar > lpsMax
+            endNow := true
+            endTxt := d == 1 ? "No LPS" : "No LPSY"
+    else if st == 6
+        if not eShown and d * (close - bLvl) >= eMult * H
+            eShown := true
+            f_phase(bar_index, "E", math.max(cLvl, bLvl), math.min(cLvl, bLvl))
+            lastEv := d == 1 ? "Markup" : "Markdown"
+        if not (inTrade and tSch == schId) and not endNow
+            if eShown or d * (bLvl - close) > 0.5 * H or bar_index - lpsBar > lpsMax * 2
+                endNow := true
+                endTxt := eShown ? (d == 1 ? "Markup" : "Markdown") : "Done"
+
+    // ── break of the climax side: re-anchor (range extension) or fail ─
+    if doBreak
+        bool newClimax = d == 1 ? isSC : isBC
+        if newClimax and reCnt < maxRe and math.abs(bLvl - xC) <= maxHAtr * atr
+            reCnt     += 1
+            nReAll    += 1
+            cLvl      := xC
+            cVol      := math.max(cVol, vol)
+            cZv       := math.max(cZv, volZ)
+            cRel      := volRel
+            arBar     := bar_index
+            st        := 2
+            pend      := 0
+            hadSpring := false
+            hadTest   := false
+            float top = math.max(cLvl, bLvl)
+            float bot = math.min(cLvl, bLvl)
+            if not na(rBox)
+                box.set_top(rBox, top)
+                box.set_bottom(rBox, bot)
+                line.set_y1(midL, (top + bot) / 2)
+                line.set_y2(midL, (top + bot) / 2)
+            f_ev(bar_index, xC, d == 1 ? "SC" : "BC", d == 1 ? "Selling Climax (range extended)" : "Buying Climax (range extended)", d == 1, col, f_tip("Range extended to a new climax", xC, volRel))
+            lastEv    := "Range extended"
+        else
+            endNow  := true
+            endFail := true
+            endTxt  := "Range broken"
+
+    // ── Spring / UTAD ──────────────────────────────────────────────
+    if doSpring
+        float depth = d * (cLvl - spLvl) / atr
+        int   spd   = bar_index - spBar
+        float cl    = rng > 0 ? (d == 1 ? (close - low) / rng : (high - close) / rng) : 0.5
+        int   q     = 0
+        q += depth <= 0.5 ? 25 : depth <= 1.0 ? 15 : 5
+        q += not hasVol ? 12 : spVol < cVol * 0.7 ? 25 : spVol < cVol ? 15 : 5
+        q += spd == 0 ? 25 : spd == 1 ? 15 : 5
+        q += cl >= 0.6 ? 25 : cl >= 0.4 ? 15 : 5
+        spQ       := q
+        hadSpring := true
+        st        := 4
+        pend      := 0
+        nSp       += 1
+        evSpring  := true
+        f_ev(spBar, spLvl, nmS, d == 1 ? "Spring" : "Upthrust After Distribution", d == 1, col, f_tip(d == 1 ? "Spring" : "Upthrust After Distribution", spLvl, volRel[bar_index - spBar]) + "\nQuality: " + str.tostring(q) + "/100")
+        f_phase(spBar, "C", math.max(cLvl, bLvl), math.min(cLvl, bLvl))
+        lastEv    := nmS
+        if aEvent
+            msgs.push(f_msg(nmS, d == 1 ? "long bias" : "short bias", spLvl, aJson ? ",\"quality\":" + str.tostring(q) : ""))
+
+    // ── Test of Spring / UTAD (+ optional early entry) ─────────────
+    if doTest
+        hadTest := true
+        evTest  := true
+        lastEv  := "Test"
+        int    life  = bar_index - cBar
+        int    score = f_score(cZv, hadSpring, spQ, true, 0.0, life, true, htf, d)
+        string g     = f_grade(score)
+        bool   sideOk = tradeSide == "Both" or (tradeSide == "Long only" and d == 1) or (tradeSide == "Short only" and d == -1)
+        bool   ok    = entryMode != "LPS only" and not inTrade and sideOk and f_gIdx(g) <= f_gIdx(minGrade)
+        f_ev(bar_index, xC, "Test" + (ok ? " · " + g : ""), "Test of " + nmS + (ok ? " · Grade " + g : ""), d == 1, col, f_tip("Test of " + nmS + " (lower effort)", xC, volRel) + "\nScore: " + str.tostring(score) + "/100")
+        if aEvent
+            msgs.push(f_msg("Test of " + nmS, d == 1 ? "long bias" : "short bias", close, ""))
+        if ok
+            lastScore := score
+            inTrade := true
+            tType   := "Spring Test"
+            tDir    := d
+            tBar    := bar_index
+            tE      := close
+            tSL     := spLvl - d * slAtr * atr
+            tRisk   := math.abs(tE - tSL)
+            tTP1    := bLvl
+            tTP2    := bLvl + d * H
+            tTP3    := bLvl + d * H * f_cause(life)
+            tGrade  := g
+            tScore  := score
+            evEntry := true
+
+    // ── SOS / SOW ──────────────────────────────────────────────────
+    if goSOS
+        if hadSpring and (na(sosBar) or sosBar < spBar)
+            nSpSos += 1
+        st     := 5
+        sosBar := bar_index
+        sosVol := vol
+        sosZv  := volZ
+        evSOS  := true
+        f_ev(bar_index, xB, d == 1 ? "SOS" : "SOW", d == 1 ? "Sign of Strength" : "Sign of Weakness", d == -1, col, f_tip(d == 1 ? "Sign of Strength" : "Sign of Weakness", close, volRel))
+        f_phase(bar_index, "D", math.max(cLvl, bLvl), math.min(cLvl, bLvl))
+        lastEv := d == 1 ? "SOS" : "SOW"
+        if aEvent
+            msgs.push(f_msg(d == 1 ? "Sign of Strength" : "Sign of Weakness", d == 1 ? "long bias" : "short bias", close, ""))
+
+    // ── LPS / LPSY + trade plan ────────────────────────────────────
+    if doLPS
+        int    life   = bar_index - cBar
+        bool   lowEff = not hasVol or vol < sosVol
+        int    score  = f_score(cZv, hadSpring, spQ, hadTest, sosZv, life, lowEff, htf, d)
+        string g      = f_grade(score)
+        bool   sideOk = tradeSide == "Both" or (tradeSide == "Long only" and d == 1) or (tradeSide == "Short only" and d == -1)
+        bool   ok     = entryMode != "Spring Test only" and not inTrade and sideOk and f_gIdx(g) <= f_gIdx(minGrade)
+        string nmL    = d == 1 ? "LPS" : "LPSY"
+        st        := 6
+        lpsBar    := bar_index
+        lastEv    := nmL
+        lastScore := score
+        f_ev(bar_index, xC, nmL + (ok ? " · " + g : ""), (d == 1 ? "Last Point of Support" : "Last Point of Supply") + (ok ? " · Grade " + g : ""), d == 1, col, f_tip(d == 1 ? "Last Point of Support" : "Last Point of Supply", xC, volRel) + "\nScore: " + str.tostring(score) + "/100")
+        if ok
+            float mid  = (cLvl + bLvl) / 2
+            float slB  = slMode == "Range mid" ? mid : slMode == "LPS low / high" ? xC : (hadSpring ? spLvl : mid)
+            inTrade := true
+            tType   := nmL
+            tDir    := d
+            tBar    := bar_index
+            tE      := close
+            tSL     := slB - d * slAtr * atr
+            tRisk   := math.abs(tE - tSL)
+            tTP1    := bLvl + d * 0.5 * H
+            tTP2    := bLvl + d * H
+            tTP3    := bLvl + d * H * f_cause(life)
+            tGrade  := g
+            tScore  := score
+            evEntry := true
+
+    // ── open the trade (shared by Test and LPS entries) ────────────
+    if evEntry
+        tRisk := math.max(tRisk, syminfo.mintick)
+        if d * (tTP1 - tE) < tRisk
+            tTP1 := tE + d * tRisk
+        if d * (tTP2 - tTP1) < 0.5 * tRisk
+            tTP2 := tTP1 + d * tRisk
+        if d * (tTP3 - tTP2) < 0.5 * tRisk
+            tTP3 := tTP2 + d * tRisk
+        tCurSL  := tSL
+        tSch    := schId
+        tHits   := 0
+        tReal   := 0.0
+        tRemain := 1.0
+        if showTrade
+            tRiskB := box.new(bar_index, tE, bar_index + 1, tSL, border_color = color.new(distCol, 60), bgcolor = color.new(distCol, 85))
+            qB.push(tRiskB)
+            qBi.push(schId)
+            tRewB := box.new(bar_index, tE, bar_index + 1, scaleOut ? tTP3 : tTP2, border_color = color.new(accCol, 60), bgcolor = color.new(accCol, 88))
+            qB.push(tRewB)
+            qBi.push(schId)
+            tTp1L := line.new(bar_index, tTP1, bar_index + 1, tTP1, color = color.new(accCol, 0), style = line.style_dashed, width = 1)
+            qN.push(tTp1L)
+            qNi.push(schId)
+            tTp2L := line.new(bar_index, tTP2, bar_index + 1, tTP2, color = color.new(accCol, 0), style = line.style_dashed, width = 1)
+            qN.push(tTp2L)
+            qNi.push(schId)
+        if aEntry
+            msgs.push(f_msg(tType + " entry · grade " + tGrade, d == 1 ? "long" : "short", tE, aJson ? ",\"sl\":" + str.tostring(tSL) + ",\"tp1\":" + str.tostring(tTP1) + ",\"tp2\":" + str.tostring(tTP2) + ",\"tp3\":" + str.tostring(tTP3) + ",\"score\":" + str.tostring(tScore) : " · SL " + str.tostring(tSL, format.mintick) + " · TP1 " + str.tostring(tTP1, format.mintick) + " · TP2 " + str.tostring(tTP2, format.mintick) + " · TP3 " + str.tostring(tTP3, format.mintick)))
+
+    // ── global expiry ──────────────────────────────────────────────
+    if not endNow and st >= 1 and st <= 5 and bar_index - cBar > maxLife
+        endNow := true
+        endTxt := "Range expired"
+
+    // ── extend / close the active range ────────────────────────────
+    if st >= 2 and not na(rBox)
+        box.set_right(rBox, bar_index)
+        line.set_x2(midL, bar_index)
+        if not endNow
+            box.set_text(rBox, (d == 1 ? "Accumulation" : "Distribution") + " · Phase " + f_phaseName(st))
+    if endNow
+        if st >= 2
+            if not na(rBox)
+                box.set_text(rBox, (d == 1 ? "Accumulation" : "Distribution") + " · " + endTxt)
+            if endFail
+                nFail  += 1
+                evFail := true
+                if aFail
+                    msgs.push(f_msg(endTxt, "", close, ""))
+                if not na(rBox)
+                    box.set_bgcolor(rBox, color.new(color.gray, 90))
+                    box.set_border_color(rBox, color.new(color.gray, 40))
+                    box.set_text_color(rBox, color.new(color.gray, 10))
+                if showFail
+                    f_ev(bar_index, close, "✕", "✕ " + endTxt, d == 1, color.new(#F23645, 0), endTxt)
+        lastEv := endTxt
+        st     := 0
+        pend   := 0
+
+// ═══════════════════════════════════════════════════════════════════════
+// LIVE READ-OUTS
+// ═══════════════════════════════════════════════════════════════════════
+float Hn   = math.abs(bLvl - cLvl)
+float midN = (cLvl + bLvl) / 2
+int   lifeN = st >= 1 ? bar_index - cBar : 0
+
+f_conf() =>
+    float c = st == 1 ? 10 : st == 2 ? 20 : st == 3 ? 30 + 10 * math.min(float(bar_index - bStart) / math.max(minB, 1), 1.0) : st == 4 ? 50 + 0.15 * spQ : st == 5 ? 70 + (hadSpring ? 7 : 0) + (hadTest ? 5 : 0) : st == 6 ? 80 + 0.17 * lastScore : 0
+    math.min(c, 97)
+
+f_wait() =>
+    string nS = d == 1 ? "Spring" : "UTAD"
+    string nO = d == 1 ? "SOS" : "SOW"
+    string nL = d == 1 ? "LPS" : "LPSY"
+    st == 0 ? "Climax bar (volume z ≥ " + str.tostring(climaxZ, "0.0") + ")" : st == 1 ? "Pullback ≥ " + str.tostring(arPull, "0.0") + " ATR to confirm AR" : st == 2 ? "Retest of climax zone on lower volume (ST)" : st == 3 ? (bar_index - bStart < minB ? "Phase B building " + str.tostring(bar_index - bStart) + "/" + str.tostring(minB) + " bars" : nS + " or " + nO + " close beyond " + str.tostring(bLvl, format.mintick)) : st == 4 ? "Test on lower volume or " + nO : st == 5 ? nL + " pullback to " + str.tostring(bLvl, format.mintick) + " (" + str.tostring(math.max(lpsMax - (bar_index - sosBar), 0)) + " bars left)" : (inTrade ? "Targets" : (d == 1 ? "Markup" : "Markdown"))
+
+f_story() =>
+    st == 0 ? "—" : d == 1 ? (st <= 2 ? "Selling climax absorbed" : st == 3 ? (hasVol and vS10 < vMa * 0.85 ? "Supply drying up" : "Supply still active") : st == 4 ? "Weak hands shaken out" : st == 5 ? "Demand stepping in" : "Demand in control") : (st <= 2 ? "Buying climax absorbed" : st == 3 ? (hasVol and vS10 < vMa * 0.85 ? "Demand drying up" : "Demand still active") : st == 4 ? "Late buyers trapped" : st == 5 ? "Supply stepping in" : "Supply in control")
+
+f_inval() =>
+    st == 1 ? cLvl - d * atr : st == 2 or st == 3 ? cLvl - d * springPen * atr : st == 4 ? spLvl : st == 5 ? midN : st == 6 ? (inTrade ? tCurSL : midN) : na
+
+f_chk(bool ok, bool now) =>
+    ok ? "✓" : now ? "▶" : "·"
+
+// ═══════════════════════════════════════════════════════════════════════
+// DASHBOARD
+// ═══════════════════════════════════════════════════════════════════════
+color thBg = dashTheme == "Dark" ? #131722 : dashTheme == "Light" ? #FFFFFF : chart.bg_color
+color thFg = dashTheme == "Dark" ? #D1D4DC : dashTheme == "Light" ? #131722 : chart.fg_color
+string dFs = dashFont == "Tiny" ? size.tiny : dashFont == "Normal" ? size.normal : size.small
+
+var table tb = table.new(f_pos(dashPos), 2, 40, bgcolor = color.new(thBg, 6), border_color = color.new(thFg, 88), border_width = 1, frame_color = color.new(thFg, 70), frame_width = 1)
+var table mp = table.new(f_pos(mapPos), 1, 10, bgcolor = color.new(thBg, 6), border_color = color.new(thFg, 88), border_width = 1, frame_color = color.new(thFg, 70), frame_width = 1)
+var label sumL = na
+
+f_sr(float x) =>
+    (x >= 0 ? "+" : "") + str.tostring(x, "0.00")
+
+f_zebra(int r) =>
+    r % 2 == 0 ? color.new(thFg, 96) : color.new(thBg, 100)
+
+f_row(int r, string k, string v, color vc, color bg) =>
+    color b = na(bg) ? f_zebra(r) : bg
+    table.cell(tb, 0, r, "  " + k, text_color = color.new(thFg, 35), text_size = dFs, text_halign = text.align_left, bgcolor = b)
+    table.cell(tb, 1, r, v + "  ", text_color = vc, text_size = dFs, text_halign = text.align_right, bgcolor = b)
+    r + 1
+
+f_sec(int r, string t, color c) =>
+    table.cell(tb, 0, r, t, text_color = c, text_size = size.tiny, text_halign = text.align_left, bgcolor = color.new(c, 85))
+    table.cell(tb, 1, r, "", text_size = size.tiny, bgcolor = color.new(c, 85))
+    r + 1
+
+f_bar(float p) =>
+    int n = int(math.round(math.max(math.min(p, 100.0), 0.0) / 10.0))
+    str.repeat("▰", n) + str.repeat("▱", 10 - n)
+
+f_lvl(float p) =>
+    p >= 75 ? accCol : p >= 50 ? #FF9800 : color.new(thFg, 40)
+
+if barstate.islast
+    color sc   = st == 0 ? #2962FF : d == 1 ? accCol : distCol
+    color tc   = tDir == 1 ? accCol : distCol
+    bool  full = dashMode == "Full"
+    string nS  = d == 1 ? "Spring" : "UTAD"
+    string nO  = d == 1 ? "SOS" : "SOW"
+    string nL  = d == 1 ? "LPS" : "LPSY"
+    int    nAll = trR.size()
+    float  rAll = gR.get(0) + gR.get(1) + gR.get(2)
+    int    h1 = 0
+    int    h2 = 0
+    int    h3 = 0
+    int    n30 = 0
+    int    w30 = 0
+    float  r30 = 0.0
+    int    t30 = timenow - 30 * 86400000
+    string strip = ""
+    for i = 0 to math.max(nAll - 1, 0)
+        if nAll == 0
+            break
+        int hh = trH.get(i)
+        h1 += hh >= 1 ? 1 : 0
+        h2 += hh >= 2 ? 1 : 0
+        h3 += hh >= 3 ? 1 : 0
+        if trT.get(i) >= t30
+            n30 += 1
+            w30 += trR.get(i) > 0 ? 1 : 0
+            r30 += trR.get(i)
+        if i >= nAll - 10
+            strip += trR.get(i) > 0 ? "🟩" : trR.get(i) < 0 ? "🟥" : "⬜"
+    string evr = volZ >= 1.5 and rng <= rngMa ? "⚠ High effort, small result" : volZ >= 1.5 ? "⚡ High effort, big result" : volZ <= -0.5 and rng >= 1.3 * rngMa ? "↗ Low effort, big result" : "· Normal"
+    string chk = st == 0 ? "—" : (d == 1 ? "SC" : "BC") + f_chk(st >= 1, false) + " AR" + f_chk(st >= 2, st == 1) + " ST" + f_chk(st >= 3, st == 2) + " " + (d == 1 ? "SP" : "UT") + f_chk(hadSpring, st == 3) + " T" + f_chk(hadTest, st == 4) + " " + nO + f_chk(st >= 5, st == 3 or st == 4) + " " + nL + f_chk(st >= 6, st == 5)
+    float inv  = f_inval()
+    float conf = f_conf()
+    float wr30 = n30 > 0 ? 100.0 * w30 / n30 : 0.0
+    float avgR = nAll > 0 ? rAll / nAll : 0.0
+
+    if showDash
+        table.clear(tb, 0, 0, 1, 39)
+        int r = 0
+        // title bar
+        table.cell(tb, 0, r, "  ◆ EYE WYCKOFF PHASES", text_color = color.white, text_size = dFs, bgcolor = sc, text_halign = text.align_left)
+        table.cell(tb, 1, r, (st == 0 ? "SEARCHING" : "PHASE " + f_phaseName(st)) + "  ", text_color = color.white, text_size = dFs, bgcolor = sc, text_halign = text.align_right)
+        r += 1
+        r := f_row(r, "Confidence", st == 0 ? "—" : f_bar(conf) + " " + str.tostring(conf, "0") + "%", f_lvl(conf), color.new(sc, 92))
+
+        r := f_sec(r, "  ▌STRUCTURE", sc)
+        r := f_row(r, "Schematic", st == 0 ? "Searching for climax" : (d == 1 ? "▲ ACCUMULATION" : "▼ DISTRIBUTION"), sc, na)
+        r := f_row(r, "Events", chk, thFg, na)
+        r := f_row(r, "Waiting for", f_wait(), thFg, na)
+        if full
+            r := f_row(r, "Last event", lastEv, thFg, na)
+        r := f_row(r, "HTF bias · " + htfTf, htf == 1 ? "▲ UP" : htf == -1 ? "▼ DOWN" : "◆ RANGE", htf == 1 ? accCol : htf == -1 ? distCol : #FF9800, na)
+        if full
+            r := f_row(r, "Range", st >= 2 ? str.tostring(math.min(cLvl, bLvl), format.mintick) + " – " + str.tostring(math.max(cLvl, bLvl), format.mintick) : "—", thFg, na)
+            r := f_row(r, "Height", st >= 2 ? str.tostring(Hn, format.mintick) + "  (" + str.tostring(Hn / atr, "0.0") + " ATR)" : "—", thFg, na)
+            r := f_row(r, "Cause → target", st >= 2 ? str.tostring(lifeN) + " bars → " + str.tostring(bLvl + d * Hn * f_cause(lifeN), format.mintick) : "—", accCol, na)
+        r := f_row(r, "✕ Invalidation", na(inv) ? "—" : str.tostring(inv, format.mintick), distCol, color.new(distCol, 92))
+
+        if full
+            r := f_sec(r, "  ▌VOLUME", #2962FF)
+            r := f_row(r, "Story", hasVol ? f_story() : "No volume data", thFg, na)
+            r := f_row(r, "Effort vs result", hasVol ? evr : "No volume data", thFg, na)
+            r := f_row(r, nS + " quality", hadSpring and st >= 4 ? f_bar(spQ) + " " + str.tostring(spQ) : "—", f_lvl(spQ), na)
+
+        r := f_sec(r, "  ▌TRADE", inTrade ? tc : color.new(thFg, 40))
+        if inTrade
+            r := f_row(r, tDir == 1 ? "▲ LONG" : "▼ SHORT", tType + " · Grade " + tGrade + " · " + str.tostring(tScore), color.white, tc)
+            r := f_row(r, "Entry", str.tostring(tE, format.mintick), thFg, na)
+            r := f_row(r, tCurSL != tSL ? "Stop (moved)" : "Stop", str.tostring(tCurSL, format.mintick), distCol, color.new(distCol, 90))
+            r := f_row(r, (tHits >= 1 ? "✓ " : "") + "TP1", str.tostring(tTP1, format.mintick) + "  ·  " + str.tostring(math.abs(tTP1 - tE) / tRisk, "0.0") + "R", accCol, color.new(accCol, tHits >= 1 ? 75 : 92))
+            r := f_row(r, (tHits >= 2 ? "✓ " : "") + "TP2", str.tostring(tTP2, format.mintick) + "  ·  " + str.tostring(math.abs(tTP2 - tE) / tRisk, "0.0") + "R", accCol, color.new(accCol, tHits >= 2 ? 75 : 92))
+            if scaleOut
+                r := f_row(r, "TP3 · cause", str.tostring(tTP3, format.mintick) + "  ·  " + str.tostring(math.abs(tTP3 - tE) / tRisk, "0.0") + "R", accCol, color.new(accCol, 92))
+        else
+            r := f_row(r, "Status", "No open trade", color.new(thFg, 40), na)
+
+        r := f_sec(r, "  ▌PERFORMANCE", #9C27B0)
+        r := f_row(r, "Last 10", strip == "" ? "—" : strip, thFg, na)
+        r := f_row(r, "30 days", str.tostring(n30) + " trades · " + f_pct(w30, n30) + " win · " + (n30 > 0 ? f_sr(r30 / n30) + "R" : "—"), n30 == 0 ? thFg : r30 >= 0 ? accCol : distCol, na)
+        r := f_row(r, "All trades", str.tostring(nAll), thFg, na)
+        r := f_row(r, "TP1 · TP2 · TP3", f_pct(h1, nAll) + " · " + f_pct(h2, nAll) + " · " + f_pct(h3, nAll), thFg, na)
+        r := f_row(r, "Avg R · grade A", (nAll > 0 ? f_sr(avgR) : "—") + "  ·  " + (gN.get(0) > 0 ? f_sr(gR.get(0) / gN.get(0)) : "—"), nAll == 0 ? thFg : avgR >= 0 ? accCol : distCol, color.new(nAll == 0 ? thFg : avgR >= 0 ? accCol : distCol, 92))
+        if full
+            r := f_row(r, nS + " → " + nO, f_pct(nSpSos, nSp) + "  (" + str.tostring(nSpSos) + "/" + str.tostring(nSp) + ")", thFg, na)
+            r := f_row(r, "Ranges · failed · ext.", str.tostring(nAcc + nDist) + " · " + str.tostring(nFail) + " · " + str.tostring(nReAll), thFg, na)
+        table.cell(tb, 0, r, "  In-sample · before spread & commission", text_color = color.new(thFg, 55), text_size = size.tiny, text_halign = text.align_left)
+        table.cell(tb, 1, r, "EyeAlgo  ", text_color = color.new(thFg, 55), text_size = size.tiny, text_halign = text.align_right)
+
+    // ── schematic map panel ───────────────────────────────────────
+    if showMap
+        table.clear(mp, 0, 0, 0, 9)
+        array<string> ev = d == 1 ? array.from("Selling Climax (SC)", "Automatic Rally (AR)", "Secondary Test (ST)", "Spring", "Test", "Sign of Strength (SOS)", "Last Point of Support (LPS)", "Markup") : array.from("Buying Climax (BC)", "Automatic Reaction (AR)", "Secondary Test (ST)", "UTAD", "Test", "Sign of Weakness (SOW)", "Last Point of Supply (LPSY)", "Markdown")
+        array<string> ph = array.from("A", "A", "A→B", "C", "C", "D", "D", "E")
+        array<bool> dn = array.from(st >= 1, st >= 2, st >= 3, hadSpring and st >= 4, hadTest and st >= 4, st >= 5, st >= 6, eShown and st == 6)
+        int cur = st == 0 ? -1 : st == 1 ? 1 : st == 2 ? 2 : st == 3 ? 3 : st == 4 ? (hadTest ? 5 : 4) : st == 5 ? 6 : 7
+        color mc = st == 0 ? #2962FF : d == 1 ? accCol : distCol
+        table.cell(mp, 0, 0, "  " + (st == 0 ? "◇ SCHEMATIC MAP" : d == 1 ? "▲ ACCUMULATION MAP" : "▼ DISTRIBUTION MAP") + "  ", text_color = color.white, text_size = dFs, bgcolor = mc, text_halign = text.align_left)
+        for i = 0 to 7
+            bool done_ = st != 0 and dn.get(i)
+            bool now_  = i == cur
+            string ic  = done_ ? "●" : now_ ? "◉" : "○"
+            table.cell(mp, 0, i + 1, "  " + ic + "  " + ph.get(i) + "  " + ev.get(i) + (now_ ? "  ◀" : "") + "  ", text_color = done_ ? mc : now_ ? thFg : color.new(thFg, 65), text_size = dFs, bgcolor = now_ ? color.new(mc, 78) : done_ ? color.new(mc, 93) : color.new(thBg, 100), text_halign = text.align_left)
+
+    // ── floating summary label ────────────────────────────────────
+    label.delete(sumL)
+    if showSum and st >= 1
+        string txt = (d == 1 ? "Accumulation" : "Distribution") + " · Phase " + f_phaseName(st) + "\nNext: " + f_wait() + "\nConfidence " + str.tostring(f_conf(), "0") + "%"
+        sumL := label.new(bar_index + 3, close, txt, xloc = xloc.bar_index, style = label.style_label_left, color = color.new(d == 1 ? accCol : distCol, 15), textcolor = color.white, size = sz)
+
+// ═══════════════════════════════════════════════════════════════════════
+// ALERTS
+// ═══════════════════════════════════════════════════════════════════════
+alertcondition(barstate.isconfirmed and evRange, "New Wyckoff range", "Eye Wyckoff Phases: new accumulation / distribution range on {{ticker}}")
+alertcondition(barstate.isconfirmed and evSpring, "Spring / UTAD", "Eye Wyckoff Phases: Spring / UTAD confirmed on {{ticker}}")
+alertcondition(barstate.isconfirmed and evTest, "Test of Spring / UTAD", "Eye Wyckoff Phases: Test of Spring / UTAD on {{ticker}}")
+alertcondition(barstate.isconfirmed and evSOS, "SOS / SOW", "Eye Wyckoff Phases: Sign of Strength / Weakness on {{ticker}}")
+alertcondition(barstate.isconfirmed and evEntry, "Trade entry", "Eye Wyckoff Phases: LPS / LPSY or Spring Test entry on {{ticker}}")
+alertcondition(barstate.isconfirmed and evTP1, "TP1 hit", "Eye Wyckoff Phases: TP1 hit on {{ticker}}")
+alertcondition(barstate.isconfirmed and evTP2, "TP2 hit", "Eye Wyckoff Phases: TP2 hit on {{ticker}}")
+alertcondition(barstate.isconfirmed and evTP3, "TP3 hit", "Eye Wyckoff Phases: TP3 (cause target) hit on {{ticker}}")
+alertcondition(barstate.isconfirmed and evSL, "Stop hit", "Eye Wyckoff Phases: stop hit on {{ticker}}")
+alertcondition(barstate.isconfirmed and evFail, "Range failed", "Eye Wyckoff Phases: range broken / failed Spring or UTAD on {{ticker}}")
+if msgs.size() > 0
+    alert(aJson ? "[" + msgs.join(",") + "]" : msgs.join(" | "), alert.freq_once_per_bar_close)
